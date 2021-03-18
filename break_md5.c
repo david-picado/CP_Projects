@@ -4,22 +4,26 @@
 #include <stdlib.h>
 #include <string.h>
 #include <pthread.h>
+#include <zconf.h>
 
 #define PASS_LEN 6
 #define NUM_THREADS 6
 
+#define PBSTR "==================================================================================================="
+#define PBWIDTH 70
+
 struct hash {
     char * argument;
     char * passwd;
-    int find[];
+    long cont;
+    pthread_mutex_t * mutex;
+    int flag;
 };
 
 struct args {
     int thread_num;
     struct hash * hash;
-    int flag;
     long min;
-    long max;
 };
 
 struct thread_info {
@@ -67,6 +71,22 @@ void to_hex(unsigned char *res, char *hex_res) {
     hex_res[MD5_DIGEST_LENGTH * 2] = '\0';
 }
 
+void * progress_bar(void * ptr) {
+    long maximum = ipow(26, PASS_LEN);
+    struct args * args = ptr;
+    while (args->hash->flag == 0) {
+        int val_aux = (int) ((args->hash->cont * 100) / maximum);
+        int lpad = (int) ((args->hash->cont * PBWIDTH) / maximum);
+        int rpad = PBWIDTH - lpad;
+        printf("\033[1;33m");
+        printf("\r%3d%% [%.*s%*s]", val_aux, lpad, PBSTR, rpad, "");
+        fflush(stdout);
+        usleep(10000);
+    }
+    printf("\n");
+    return NULL;
+}
+
 void * break_pass(void *md5) {
     struct args * args = md5;
     unsigned char res[MD5_DIGEST_LENGTH];
@@ -82,23 +102,22 @@ void * break_pass(void *md5) {
 
         to_hex(res, hex_res);
 
+        pthread_mutex_lock(args->hash->mutex);
+        args->hash->cont++;
+        pthread_mutex_unlock(args->hash->mutex);
         if(!strcmp(hex_res, args->hash->argument)) {
             args->hash->passwd = (char *) pass;
-            args->hash->find[args->thread_num] = args->thread_num;
-            args->flag = 1;
-            //pthread_cancel(pthread_self());
+            args->hash->flag = 1;
             break; // Found it!
         }
         if ((strcmp(args->hash->passwd, "")) != 0)
             break;
-        //pthread_cancel(pthread_self());
     }
-    //pthread_exit(NULL);
 
     return NULL;
 }
 
-struct thread_info * start_threads(char * cypher, struct hash * hash) {
+struct thread_info * start_threads(struct hash * hash) {
     int i;
     struct thread_info * threads;
 
@@ -110,19 +129,33 @@ struct thread_info * start_threads(char * cypher, struct hash * hash) {
         exit(1);
     }
 
+    if ((hash->mutex = malloc(sizeof(pthread_mutex_t))) == NULL) {
+        printf("Not enough memory\n");
+        exit(1);
+    }
+
+    pthread_mutex_init(hash->mutex, NULL);
+
     for (i = 0; i < NUM_THREADS; i++) {
         threads[i].args = malloc(sizeof(struct args));
         long temp = ipow(26, PASS_LEN) / NUM_THREADS;
         threads[i].args->hash = hash;
         threads[i].args->thread_num = i;
-        threads[i].args->flag = 0;
-
-
+        threads[i].args->hash->flag = 0;
         threads[i].args->min = (temp + 1) * i;
 
-        if (0 != pthread_create(&threads[i].id, NULL, break_pass, threads[i].args)) {
-            printf("Could not create thread #%d", i);
-            exit(1);
+
+        if (i == NUM_THREADS - 1) {
+            if (0 != pthread_create(&threads[i].id, NULL, progress_bar, threads[i].args)) {
+                printf("Could not create thread #%d", i);
+                exit(1);
+            }
+        }
+        else {
+            if (0 != pthread_create(&threads[i].id, NULL, break_pass, threads[i].args)) {
+                printf("Could not create thread #%d", i);
+                exit(1);
+            }
         }
     }
 
@@ -136,18 +169,18 @@ void wait(struct thread_info *threads, struct hash * hash)
         pthread_join(threads[i].id, NULL);
     }
 
-    for (int i = 0; i < NUM_THREADS; ++i) {
-        if (threads[i].args->flag == 1) {
-            printf("%s: %s\n", hash->argument, hash->passwd);
-        }
+    if (hash->flag == 1) {
+        printf("\033[0;32m");
+        printf("%s: %s\n", hash->argument, hash->passwd);
     }
 
 
     for (int i = 0; i < NUM_THREADS; i++)
         free(threads[i].args);
 
+    pthread_mutex_destroy(hash->mutex);
+
     free(threads);
-    //free(hash);
 
 }
 
@@ -161,10 +194,12 @@ int main(int argc, char *argv[]) {
 
     hash.argument = argv[1];
     hash.passwd = "";
+    hash.cont = 0;
+    hash.flag = 0;
 
 
     // Create the threads
-    thrs = start_threads(argv[1], &hash);
+    thrs = start_threads(&hash);
     wait(thrs, &hash);
     return 0;
 }
