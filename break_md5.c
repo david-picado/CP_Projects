@@ -13,11 +13,13 @@
 #define PBWIDTH 70
 
 struct hash {
-    char * argument;
-    char * passwd;
+    char * argument[250];
+    char * passwd[250];
     long cont;
     pthread_mutex_t * mutex;
     int flag;
+    int pass_flags;
+    int arg_length;
 };
 
 struct args {
@@ -74,9 +76,9 @@ void to_hex(unsigned char *res, char *hex_res) {
 void * progress_bar(void * ptr) {
     long maximum = ipow(26, PASS_LEN);
     struct args * args = ptr;
-    while (args->hash->flag == 0) {
-        int val_aux = (int) ((args->hash->cont * 100) / maximum);
-        int lpad = (int) ((args->hash->cont * PBWIDTH) / maximum);
+    while (args->hash->pass_flags != 0) {
+        int val_aux = (int) ((args->hash->cont * 100) / (maximum * args->hash->arg_length));
+        int lpad = (int) ((args->hash->cont * PBWIDTH) / (maximum * args->hash->arg_length));
         int rpad = PBWIDTH - lpad;
         printf("\033[1;33m");
         printf("\r%3d%% [%.*s%*s]", val_aux, lpad, PBSTR, rpad, "");
@@ -95,24 +97,33 @@ void * break_pass(void *md5) {
     long bound = ipow(26, PASS_LEN); // we have passwords of PASS_LEN
     // lowercase chars =>
     //     26 ^ PASS_LEN  different cases
+
     for(long i = args->min; i <= (bound / NUM_THREADS) * (args->thread_num + 1); i++) {
+        if (args->hash->pass_flags == 0)
+            break;
         long_to_pass(i, pass);
 
         MD5(pass, PASS_LEN, res);
 
         to_hex(res, hex_res);
 
-        pthread_mutex_lock(args->hash->mutex);
+        pthread_mutex_lock(&args->hash->mutex[0]);
         args->hash->cont++;
-        pthread_mutex_unlock(args->hash->mutex);
-        if(!strcmp(hex_res, args->hash->argument)) {
-            args->hash->passwd = (char *) pass;
-            args->hash->flag = 1;
-            break; // Found it!
+        pthread_mutex_unlock(&args->hash->mutex[0]);
+
+        for (int j = 0; j < args->hash->arg_length; ++j) {
+            if(!strcmp(hex_res, args->hash->argument[j])) {
+                args->hash->passwd[j] = (char *) pass;
+                printf("\033[0;32m");
+                printf("\n%s: %s\n", args->hash->argument[j], args->hash->passwd[j]);
+                pthread_mutex_lock(&args->hash->mutex[1]);
+                args->hash->flag = 1;
+                args->hash->pass_flags--;
+                pthread_mutex_unlock(&args->hash->mutex[1]);
+            }
         }
-        if ((strcmp(args->hash->passwd, "")) != 0)
-            break;
     }
+
 
     return NULL;
 }
@@ -129,12 +140,14 @@ struct thread_info * start_threads(struct hash * hash) {
         exit(1);
     }
 
-    if ((hash->mutex = malloc(sizeof(pthread_mutex_t))) == NULL) {
+    if ((hash->mutex = malloc(2 * sizeof(pthread_mutex_t))) == NULL) {
         printf("Not enough memory\n");
         exit(1);
     }
 
-    pthread_mutex_init(hash->mutex, NULL);
+    for (int j = 0; j < 2; ++j) {
+        pthread_mutex_init(&hash->mutex[j], NULL);
+    }
 
     for (i = 0; i < NUM_THREADS; i++) {
         threads[i].args = malloc(sizeof(struct args));
@@ -169,18 +182,15 @@ void wait(struct thread_info *threads, struct hash * hash)
         pthread_join(threads[i].id, NULL);
     }
 
-    if (hash->flag == 1) {
-        printf("\033[0;32m");
-        printf("%s: %s\n", hash->argument, hash->passwd);
-    }
-
-
     for (int i = 0; i < NUM_THREADS; i++)
         free(threads[i].args);
 
-    pthread_mutex_destroy(hash->mutex);
+    for (int i = 0; i < 2; ++i) {
+        pthread_mutex_destroy(&hash->mutex[i]);
+    }
 
     free(threads);
+    free(hash->mutex);
 
 }
 
@@ -192,11 +202,16 @@ int main(int argc, char *argv[]) {
         exit(0);
     }
 
-    hash.argument = argv[1];
-    hash.passwd = "";
+    for (int i = 1; i < argc; ++i) {
+        hash.argument[i - 1] = argv[i];
+    }
+    for (int i = 0; i < 250; ++i) {
+        hash.passwd[i] = "";
+    }
     hash.cont = 0;
     hash.flag = 0;
-
+    hash.arg_length = argc - 1;
+    hash.pass_flags = hash.arg_length;
 
     // Create the threads
     thrs = start_threads(&hash);
